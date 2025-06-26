@@ -6,7 +6,8 @@
 
 import fs from 'fs';
 import path from 'path';
-import { glob } from 'glob';
+import { spawn } from 'child_process';
+import { rgPath } from '@vscode/ripgrep';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { BaseTool, ToolResult } from './tools.js';
 import { shortenPath, makeRelative } from '../utils/paths.js';
@@ -16,36 +17,6 @@ import { Config } from '../config/config.js';
 export interface GlobPath {
   fullpath(): string;
   mtimeMs?: number;
-}
-
-/**
- * Sorts file entries based on recency and then alphabetically.
- * Recent files (modified within recencyThresholdMs) are listed first, newest to oldest.
- * Older files are listed after recent ones, sorted alphabetically by path.
- */
-export function sortFileEntries(
-  entries: GlobPath[],
-  nowTimestamp: number,
-  recencyThresholdMs: number,
-): GlobPath[] {
-  const sortedEntries = [...entries];
-  sortedEntries.sort((a, b) => {
-    const mtimeA = a.mtimeMs ?? 0;
-    const mtimeB = b.mtimeMs ?? 0;
-    const aIsRecent = nowTimestamp - mtimeA < recencyThresholdMs;
-    const bIsRecent = nowTimestamp - mtimeB < recencyThresholdMs;
-
-    if (aIsRecent && bIsRecent) {
-      return mtimeB - mtimeA;
-    } else if (aIsRecent) {
-      return -1;
-    } else if (bIsRecent) {
-      return 1;
-    } else {
-      return a.fullpath().localeCompare(b.fullpath());
-    }
-  });
-  return sortedEntries;
 }
 
 /**
@@ -160,15 +131,16 @@ export class GlobTool extends BaseTool<GlobToolParams, ToolResult> {
       return `Search path ("${searchDirAbsolute}") resolves outside the tool's root directory ("${this.rootDirectory}").`;
     }
 
-    const targetDir = searchDirAbsolute || this.rootDirectory;
     try {
-      if (!fs.existsSync(targetDir)) {
-        return `Search path does not exist ${targetDir}`;
-      }
-      if (!fs.statSync(targetDir).isDirectory()) {
-        return `Search path is not a directory: ${targetDir}`;
+      // Check if the path exists and is a directory synchronously
+      const stats = fs.statSync(searchDirAbsolute);
+      if (!stats.isDirectory()) {
+        return `Search path is not a directory: ${searchDirAbsolute}`;
       }
     } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        return `Search path does not exist: ${searchDirAbsolute}`;
+      }
       return `Error accessing search path: ${e}`;
     }
 
@@ -207,7 +179,7 @@ export class GlobTool extends BaseTool<GlobToolParams, ToolResult> {
     if (validationError) {
       return {
         llmContent: `Error: Invalid parameters provided. Reason: ${validationError}`,
-        returnDisplay: validationError,
+        returnDisplay: `Error: ${validationError}`,
       };
     }
 
@@ -217,83 +189,91 @@ export class GlobTool extends BaseTool<GlobToolParams, ToolResult> {
         params.path || '.',
       );
 
-      // Get centralized file discovery service
-      const respectGitIgnore =
-        params.respect_git_ignore ??
-        this.config.getFileFilteringRespectGitIgnore();
-      const fileDiscovery = this.config.getFileService();
+      const args = ['--files'];
 
-      const entries = (await glob(params.pattern, {
+      if (params.case_sensitive) {
+        args.push('--glob', params.pattern);
+      } else {
+        args.push('--iglob', params.pattern);
+      }
+
+      if (params.respect_git_ignore === false) {
+        args.push('--no-ignore');
+      }
+
+      // Always include hidden files in glob searches
+      args.push('--hidden');
+
+      const rg = spawn(rgPath, args, {
         cwd: searchDirAbsolute,
-        withFileTypes: true,
-        nodir: true,
-        stat: true,
-        nocase: !params.case_sensitive,
-        dot: true,
-        ignore: ['**/node_modules/**', '**/.git/**'],
-        follow: false,
         signal,
-      })) as GlobPath[];
+      });
 
-      // Apply git-aware filtering if enabled and in git repository
-      let filteredEntries = entries;
-      let gitIgnoredCount = 0;
+      let stdout = '';
+      let stderr = '';
 
-      if (respectGitIgnore) {
-        const relativePaths = entries.map((p) =>
-          path.relative(this.rootDirectory, p.fullpath()),
-        );
-        const filteredRelativePaths = fileDiscovery.filterFiles(relativePaths, {
-          respectGitIgnore,
+      rg.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+
+      rg.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      return new Promise((resolve, reject) => {
+        rg.on('close', async (code) => {
+          if (code === 0 || code === 1) {
+            const files = stdout
+              .split('\n')
+              .map((file) => file.trim())
+              .filter((file) => file.length > 0)
+              .map((file) => path.join(searchDirAbsolute, file));
+
+            const fileStats = files.map((file) => {
+              try {
+                const stats = fs.statSync(file);
+                return { fullpath: () => file, mtimeMs: stats.mtimeMs };
+              } catch (e) {
+                console.warn(`Could not get stats for file ${file}: ${e}`);
+                return { fullpath: () => file, mtimeMs: 0 }; // Default to 0 if stats fail
+              }
+            });
+
+            // Sort files by modification time (newest first)
+            fileStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+            const sortedAbsolutePaths = fileStats.map((entry) =>
+              entry.fullpath(),
+            );
+            const fileListDescription = sortedAbsolutePaths.join('\n');
+            const fileCount = sortedAbsolutePaths.length;
+
+            let resultMessage;
+            if (fileCount === 0) {
+              resultMessage = `No files found matching pattern "${params.pattern}"`;
+            } else {
+              resultMessage = `Found ${fileCount} file(s) matching "${params.pattern}" within ${searchDirAbsolute}`;
+              resultMessage += `, sorted by modification time (newest first):\n${fileListDescription}`;
+            }
+
+            resolve({
+              llmContent: resultMessage,
+              returnDisplay:
+                fileCount === 0
+                  ? 'No files found'
+                  : `Found ${fileCount} matching file(s)`,
+            });
+          } else {
+            const errorMessage = `ripgrep exited with code ${code}. Stderr: ${stderr}`;
+            console.error(errorMessage);
+            reject(new Error(errorMessage));
+          }
         });
-        const filteredAbsolutePaths = new Set(
-          filteredRelativePaths.map((p) => path.resolve(this.rootDirectory, p)),
-        );
 
-        filteredEntries = entries.filter((entry) =>
-          filteredAbsolutePaths.has(entry.fullpath()),
-        );
-        gitIgnoredCount = entries.length - filteredEntries.length;
-      }
-
-      if (!filteredEntries || filteredEntries.length === 0) {
-        let message = `No files found matching pattern "${params.pattern}" within ${searchDirAbsolute}.`;
-        if (gitIgnoredCount > 0) {
-          message += ` (${gitIgnoredCount} files were git-ignored)`;
-        }
-        return {
-          llmContent: message,
-          returnDisplay: `No files found`,
-        };
-      }
-
-      // Set filtering such that we first show the most recent files
-      const oneDayInMs = 24 * 60 * 60 * 1000;
-      const nowTimestamp = new Date().getTime();
-
-      // Sort the filtered entries using the new helper function
-      const sortedEntries = sortFileEntries(
-        filteredEntries,
-        nowTimestamp,
-        oneDayInMs,
-      );
-
-      const sortedAbsolutePaths = sortedEntries.map((entry) =>
-        entry.fullpath(),
-      );
-      const fileListDescription = sortedAbsolutePaths.join('\n');
-      const fileCount = sortedAbsolutePaths.length;
-
-      let resultMessage = `Found ${fileCount} file(s) matching "${params.pattern}" within ${searchDirAbsolute}`;
-      if (gitIgnoredCount > 0) {
-        resultMessage += ` (${gitIgnoredCount} additional files were git-ignored)`;
-      }
-      resultMessage += `, sorted by modification time (newest first):\n${fileListDescription}`;
-
-      return {
-        llmContent: resultMessage,
-        returnDisplay: `Found ${fileCount} matching file(s)`,
-      };
+        rg.on('error', (err) => {
+          reject(err);
+        });
+      });
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
