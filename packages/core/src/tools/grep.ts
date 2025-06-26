@@ -5,16 +5,15 @@
  */
 
 import fs from 'fs';
-import fsPromises from 'fs/promises';
+
 import path from 'path';
 import { EOL } from 'os';
 import { spawn } from 'child_process';
-import { globStream } from 'glob';
+import { rgPath } from '@vscode/ripgrep';
 import { BaseTool, ToolResult } from './tools.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import { isGitRepository } from '../utils/gitUtils.js';
 
 // --- Interfaces ---
 
@@ -241,78 +240,6 @@ export class GrepTool extends BaseTool<GrepToolParams, ToolResult> {
   // --- Grep Implementation Logic ---
 
   /**
-   * Checks if a command is available in the system's PATH.
-   * @param {string} command The command name (e.g., 'git', 'grep').
-   * @returns {Promise<boolean>} True if the command is available, false otherwise.
-   */
-  private isCommandAvailable(command: string): Promise<boolean> {
-    return new Promise((resolve) => {
-      const checkCommand = process.platform === 'win32' ? 'where' : 'command';
-      const checkArgs =
-        process.platform === 'win32' ? [command] : ['-v', command];
-      try {
-        const child = spawn(checkCommand, checkArgs, {
-          stdio: 'ignore',
-          shell: process.platform === 'win32',
-        });
-        child.on('close', (code) => resolve(code === 0));
-        child.on('error', () => resolve(false));
-      } catch {
-        resolve(false);
-      }
-    });
-  }
-
-  /**
-   * Parses the standard output of grep-like commands (git grep, system grep).
-   * Expects format: filePath:lineNumber:lineContent
-   * Handles colons within file paths and line content correctly.
-   * @param {string} output The raw stdout string.
-   * @param {string} basePath The absolute directory the search was run from, for relative paths.
-   * @returns {GrepMatch[]} Array of match objects.
-   */
-  private parseGrepOutput(output: string, basePath: string): GrepMatch[] {
-    const results: GrepMatch[] = [];
-    if (!output) return results;
-
-    const lines = output.split(EOL); // Use OS-specific end-of-line
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-
-      // Find the index of the first colon.
-      const firstColonIndex = line.indexOf(':');
-      if (firstColonIndex === -1) continue; // Malformed
-
-      // Find the index of the second colon, searching *after* the first one.
-      const secondColonIndex = line.indexOf(':', firstColonIndex + 1);
-      if (secondColonIndex === -1) continue; // Malformed
-
-      // Extract parts based on the found colon indices
-      const filePathRaw = line.substring(0, firstColonIndex);
-      const lineNumberStr = line.substring(
-        firstColonIndex + 1,
-        secondColonIndex,
-      );
-      const lineContent = line.substring(secondColonIndex + 1);
-
-      const lineNumber = parseInt(lineNumberStr, 10);
-
-      if (!isNaN(lineNumber)) {
-        const absoluteFilePath = path.resolve(basePath, filePathRaw);
-        const relativeFilePath = path.relative(basePath, absoluteFilePath);
-
-        results.push({
-          filePath: relativeFilePath || path.basename(absoluteFilePath),
-          lineNumber,
-          line: lineContent,
-        });
-      }
-    }
-    return results;
-  }
-
-  /**
    * Gets a description of the grep operation
    * @param params Parameters for the grep operation
    * @returns A string describing the grep
@@ -335,7 +262,7 @@ export class GrepTool extends BaseTool<GrepToolParams, ToolResult> {
   }
 
   /**
-   * Performs the actual search using the prioritized strategies.
+   * Performs the actual search using ripgrep.
    * @param options Search options including pattern, absolute path, and include glob.
    * @returns A promise resolving to an array of match objects.
    */
@@ -345,200 +272,107 @@ export class GrepTool extends BaseTool<GrepToolParams, ToolResult> {
     include?: string;
     signal: AbortSignal;
   }): Promise<GrepMatch[]> {
-    const { pattern, path: absolutePath, include } = options;
-    let strategyUsed = 'none';
+    const { pattern, path: absolutePath, include, signal } = options;
+    const rgArgs = [
+      '--json', // Output results in JSON format
+      '--pcre2', // Use PCRE2 regex engine for better compatibility
+      '--ignore-case', // Case-insensitive search
+      '--multiline', // Search across multiple lines
+      '--trim', // Remove leading/trailing whitespace from results
+      '--max-columns',
+      '1000', // Increase column limit to avoid truncation
+      '--max-columns-preview', // Show preview of long lines
+      '--heading', // Show file names as headings
+      '--with-filename', // Include filename in results
+      '--line-number', // Include line number in results
+      '--color',
+      'never', // Disable color output
+      '--glob',
+      '!**/.git/*', // Ignore .git directory
+      '--glob',
+      '!**/node_modules/*', // Ignore node_modules directory
+      '--glob',
+      '!**/bower_components/*', // Ignore bower_components directory
+      '--glob',
+      '!**/.svn/*', // Ignore .svn directory
+      '--glob',
+      '!**/.hg/*', // Ignore .hg directory
+    ];
 
-    try {
-      // --- Strategy 1: git grep ---
-      const isGit = isGitRepository(absolutePath);
-      const gitAvailable = isGit && (await this.isCommandAvailable('git'));
+    // Add include glob if provided
+    if (include) {
+      rgArgs.push('--glob', include);
+    }
 
-      if (gitAvailable) {
-        strategyUsed = 'git grep';
-        const gitArgs = [
-          'grep',
-          '--untracked',
-          '-n',
-          '-E',
-          '--ignore-case',
-          pattern,
-        ];
-        if (include) {
-          gitArgs.push('--', include);
-        }
+    // Add the pattern and path
+    rgArgs.push(pattern);
+    rgArgs.push(absolutePath);
 
-        try {
-          const output = await new Promise<string>((resolve, reject) => {
-            const child = spawn('git', gitArgs, {
-              cwd: absolutePath,
-              windowsHide: true,
-            });
-            const stdoutChunks: Buffer[] = [];
-            const stderrChunks: Buffer[] = [];
-
-            child.stdout.on('data', (chunk) => stdoutChunks.push(chunk));
-            child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
-            child.on('error', (err) =>
-              reject(new Error(`Failed to start git grep: ${err.message}`)),
-            );
-            child.on('close', (code) => {
-              const stdoutData = Buffer.concat(stdoutChunks).toString('utf8');
-              const stderrData = Buffer.concat(stderrChunks).toString('utf8');
-              if (code === 0) resolve(stdoutData);
-              else if (code === 1)
-                resolve(''); // No matches
-              else
-                reject(
-                  new Error(`git grep exited with code ${code}: ${stderrData}`),
-                );
-            });
-          });
-          return this.parseGrepOutput(output, absolutePath);
-        } catch (gitError: unknown) {
-          console.debug(
-            `GrepLogic: git grep failed: ${getErrorMessage(gitError)}. Falling back...`,
-          );
-        }
-      }
-
-      // --- Strategy 2: System grep ---
-      const grepAvailable = await this.isCommandAvailable('grep');
-      if (grepAvailable) {
-        strategyUsed = 'system grep';
-        const grepArgs = ['-r', '-n', '-H', '-E'];
-        const commonExcludes = ['.git', 'node_modules', 'bower_components'];
-        commonExcludes.forEach((dir) => grepArgs.push(`--exclude-dir=${dir}`));
-        if (include) {
-          grepArgs.push(`--include=${include}`);
-        }
-        grepArgs.push(pattern);
-        grepArgs.push('.');
-
-        try {
-          const output = await new Promise<string>((resolve, reject) => {
-            const child = spawn('grep', grepArgs, {
-              cwd: absolutePath,
-              windowsHide: true,
-            });
-            const stdoutChunks: Buffer[] = [];
-            const stderrChunks: Buffer[] = [];
-
-            const onData = (chunk: Buffer) => stdoutChunks.push(chunk);
-            const onStderr = (chunk: Buffer) => {
-              const stderrStr = chunk.toString();
-              // Suppress common harmless stderr messages
-              if (
-                !stderrStr.includes('Permission denied') &&
-                !/grep:.*: Is a directory/i.test(stderrStr)
-              ) {
-                stderrChunks.push(chunk);
-              }
-            };
-            const onError = (err: Error) => {
-              cleanup();
-              reject(new Error(`Failed to start system grep: ${err.message}`));
-            };
-            const onClose = (code: number | null) => {
-              const stdoutData = Buffer.concat(stdoutChunks).toString('utf8');
-              const stderrData = Buffer.concat(stderrChunks)
-                .toString('utf8')
-                .trim();
-              cleanup();
-              if (code === 0) resolve(stdoutData);
-              else if (code === 1)
-                resolve(''); // No matches
-              else {
-                if (stderrData)
-                  reject(
-                    new Error(
-                      `System grep exited with code ${code}: ${stderrData}`,
-                    ),
-                  );
-                else resolve(''); // Exit code > 1 but no stderr, likely just suppressed errors
-              }
-            };
-
-            const cleanup = () => {
-              child.stdout.removeListener('data', onData);
-              child.stderr.removeListener('data', onStderr);
-              child.removeListener('error', onError);
-              child.removeListener('close', onClose);
-              if (child.connected) {
-                child.disconnect();
-              }
-            };
-
-            child.stdout.on('data', onData);
-            child.stderr.on('data', onStderr);
-            child.on('error', onError);
-            child.on('close', onClose);
-          });
-          return this.parseGrepOutput(output, absolutePath);
-        } catch (grepError: unknown) {
-          console.debug(
-            `GrepLogic: System grep failed: ${getErrorMessage(grepError)}. Falling back...`,
-          );
-        }
-      }
-
-      // --- Strategy 3: Pure JavaScript Fallback ---
-      console.debug(
-        'GrepLogic: Falling back to JavaScript grep implementation.',
-      );
-      strategyUsed = 'javascript fallback';
-      const globPattern = include ? include : '**/*';
-      const ignorePatterns = [
-        '.git/**',
-        'node_modules/**',
-        'bower_components/**',
-        '.svn/**',
-        '.hg/**',
-      ]; // Use glob patterns for ignores here
-
-      const filesStream = globStream(globPattern, {
+    return new Promise((resolve, reject) => {
+      const child = spawn(rgPath, rgArgs, {
         cwd: absolutePath,
-        dot: true,
-        ignore: ignorePatterns,
-        absolute: true,
-        nodir: true,
-        signal: options.signal,
+        windowsHide: true,
+        signal,
       });
 
-      const regex = new RegExp(pattern, 'i');
-      const allMatches: GrepMatch[] = [];
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
 
-      for await (const filePath of filesStream) {
-        const fileAbsolutePath = filePath as string;
-        try {
-          const content = await fsPromises.readFile(fileAbsolutePath, 'utf8');
-          const lines = content.split(/\r?\n/);
-          lines.forEach((line, index) => {
-            if (regex.test(line)) {
-              allMatches.push({
-                filePath:
-                  path.relative(absolutePath, fileAbsolutePath) ||
-                  path.basename(fileAbsolutePath),
-                lineNumber: index + 1,
-                line,
-              });
+      child.stdout.on('data', (chunk) => stdoutChunks.push(chunk));
+      child.stderr.on('data', (chunk) => stderrChunks.push(chunk));
+
+      child.on('error', (err) => {
+        reject(new Error(`Failed to start ripgrep: ${err.message}`));
+      });
+
+      child.on('close', (code) => {
+        const stdoutData = Buffer.concat(stdoutChunks).toString('utf8');
+        const stderrData = Buffer.concat(stderrChunks).toString('utf8');
+
+        if (code === 0) {
+          // Success, parse JSON output
+          const matches: GrepMatch[] = [];
+          stdoutData.split(EOL).forEach((line) => {
+            if (line.trim()) {
+              try {
+                const parsed = JSON.parse(line);
+                if (parsed.type === 'match') {
+                  const filePath = parsed.data.path.text;
+                  const startLineNumber = parsed.data.line_number;
+                  const rawLineContent = parsed.data.lines.text;
+                  const lines = rawLineContent
+                    .split(/\r?\n/)
+                    .filter((l: string) => l.length > 0);
+
+                  lines.forEach((line: string, index: number) => {
+                    matches.push({
+                      filePath: path.relative(absolutePath, filePath),
+                      lineNumber: startLineNumber + index,
+                      line: line.trim(),
+                    });
+                  });
+                }
+              } catch (jsonError) {
+                console.error(
+                  `Error parsing ripgrep JSON line: ${line}`,
+                  jsonError,
+                );
+              }
             }
           });
-        } catch (readError: unknown) {
-          // Ignore errors like permission denied or file gone during read
-          if (!isNodeError(readError) || readError.code !== 'ENOENT') {
-            console.debug(
-              `GrepLogic: Could not read/process ${fileAbsolutePath}: ${getErrorMessage(readError)}`,
-            );
-          }
+          resolve(matches);
+        } else if (code === 1) {
+          // No matches found
+          resolve([]);
+        } else {
+          // Error
+          reject(
+            new Error(
+              `ripgrep exited with code ${code}: ${stderrData || 'Unknown error'}`,
+            ),
+          );
         }
-      }
-
-      return allMatches;
-    } catch (error: unknown) {
-      console.error(
-        `GrepLogic: Error in performGrepSearch (Strategy: ${strategyUsed}): ${getErrorMessage(error)}`,
-      );
-      throw error; // Re-throw
-    }
+      });
+    });
   }
 }

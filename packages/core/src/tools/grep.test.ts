@@ -4,26 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { GrepTool, GrepToolParams } from './grep.js';
 import path from 'path';
 import fs from 'fs/promises';
 import os from 'os';
-
-// Mock the child_process module to control grep/git grep behavior
-vi.mock('child_process', () => ({
-  spawn: vi.fn(() => ({
-    on: (event: string, cb: (...args: unknown[]) => void) => {
-      if (event === 'error' || event === 'close') {
-        // Simulate command not found or error for git grep and system grep
-        // to force fallback to JS implementation.
-        setTimeout(() => cb(1), 0); // cb(1) for error/close
-      }
-    },
-    stdout: { on: vi.fn() },
-    stderr: { on: vi.fn() },
-  })),
-}));
 
 describe('GrepTool', () => {
   let tempRootDir: string;
@@ -185,20 +170,6 @@ describe('GrepTool', () => {
       );
       expect(result.llmContent).toContain('File: fileB.js');
       expect(result.llmContent).toContain('L1: const foo = "bar";');
-    });
-
-    it('should be case-insensitive by default (JS fallback)', async () => {
-      const params: GrepToolParams = { pattern: 'HELLO' };
-      const result = await grepTool.execute(params, abortSignal);
-      expect(result.llmContent).toContain(
-        'Found 2 match(es) for pattern "HELLO" in path "."',
-      );
-      expect(result.llmContent).toContain('File: fileA.txt');
-      expect(result.llmContent).toContain('L1: hello world');
-      expect(result.llmContent).toContain('File: fileB.js');
-      expect(result.llmContent).toContain(
-        'L2: function baz() { return "hello"; }',
-      );
     });
 
     it('should return an error if params are invalid', async () => {
