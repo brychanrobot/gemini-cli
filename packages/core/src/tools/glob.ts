@@ -12,6 +12,7 @@ import { SchemaValidator } from '../utils/schemaValidator.js';
 import { BaseTool, ToolResult } from './tools.js';
 import { shortenPath, makeRelative } from '../utils/paths.js';
 import { Config } from '../config/config.js';
+import globToRegexp from 'glob-to-regexp';
 
 // Subset of 'Path' interface provided by 'glob' that we can implement for testing
 export interface GlobPath {
@@ -60,7 +61,7 @@ export class GlobTool extends BaseTool<GlobToolParams, ToolResult> {
     super(
       GlobTool.Name,
       'FindFiles',
-      'Efficiently finds files matching specific glob patterns (e.g., `src/**/*.ts`, `**/*.md`), returning absolute paths sorted by modification time (newest first). Ideal for quickly locating files based on their name or path structure, especially in large codebases.',
+      'Efficiently finds files matching specific glob patterns (e.g., `src/**/*.ts`, `**/*.md`), returning absolute paths. Ideal for quickly locating files based on their name or path structure, especially in large codebases.',
       {
         properties: {
           pattern: {
@@ -189,91 +190,93 @@ export class GlobTool extends BaseTool<GlobToolParams, ToolResult> {
         params.path || '.',
       );
 
-      const args = ['--files'];
+      const fileCache = this.config.getFileCacheService();
+      // Get all files from the cache, respecting .gitignore settings.
+      // This is more efficient than hitting the filesystem for every glob command.
+      const allFiles = await fileCache.getAllFiles(
+        params.respect_git_ignore ?? true,
+      );
 
-      if (params.case_sensitive) {
-        args.push('--glob', params.pattern);
-      } else {
-        args.push('--iglob', params.pattern);
+      // If a path is provided, join it with the pattern to create a single
+      // glob pattern. This allows us to match against the full list of files
+      // from the cache.
+      const globPattern = params.path
+        ? path.join(params.path, params.pattern)
+        : params.pattern;
+
+      // Convert the glob pattern to a regular expression for use with ripgrep.
+      const regexPattern = globToRegexp(globPattern, {
+        extended: true,
+        globstar: true,
+      }).source.replace(/\\\//g, '/'); // Get the regex string and unescape forward slashes
+
+      const rgArgs = ['-e', regexPattern, '-']; // Read from stdin
+      if (!params.case_sensitive) {
+        rgArgs.push('--ignore-case');
       }
 
-      if (params.respect_git_ignore === false) {
-        args.push('--no-ignore');
-      }
-
-      // Always include hidden files in glob searches
-      args.push('--hidden');
-
-      const rg = spawn(rgPath, args, {
-        cwd: searchDirAbsolute,
+      const rgProcess = spawn(rgPath, rgArgs, {
+        cwd: this.rootDirectory,
         signal,
       });
+
+      rgProcess.stdin.write(allFiles.join('\n'));
+      rgProcess.stdin.end();
 
       let stdout = '';
       let stderr = '';
 
-      rg.stdout.on('data', (data) => {
+      rgProcess.stdout.on('data', (data) => {
         stdout += data.toString();
       });
 
-      rg.stderr.on('data', (data) => {
+      rgProcess.stderr.on('data', (data) => {
         stderr += data.toString();
       });
 
-      return new Promise((resolve, reject) => {
-        rg.on('close', async (code) => {
+      await new Promise<void>((resolve, reject) => {
+        rgProcess.on('close', (code) => {
           if (code === 0 || code === 1) {
-            const files = stdout
-              .split('\n')
-              .map((file) => file.trim())
-              .filter((file) => file.length > 0)
-              .map((file) => path.join(searchDirAbsolute, file));
-
-            const fileStats = files.map((file) => {
-              try {
-                const stats = fs.statSync(file);
-                return { fullpath: () => file, mtimeMs: stats.mtimeMs };
-              } catch (e) {
-                console.warn(`Could not get stats for file ${file}: ${e}`);
-                return { fullpath: () => file, mtimeMs: 0 }; // Default to 0 if stats fail
-              }
-            });
-
-            // Sort files by modification time (newest first)
-            fileStats.sort((a, b) => b.mtimeMs - a.mtimeMs);
-
-            const sortedAbsolutePaths = fileStats.map((entry) =>
-              entry.fullpath(),
-            );
-            const fileListDescription = sortedAbsolutePaths.join('\n');
-            const fileCount = sortedAbsolutePaths.length;
-
-            let resultMessage;
-            if (fileCount === 0) {
-              resultMessage = `No files found matching pattern "${params.pattern}"`;
-            } else {
-              resultMessage = `Found ${fileCount} file(s) matching "${params.pattern}" within ${searchDirAbsolute}`;
-              resultMessage += `, sorted by modification time (newest first):\n${fileListDescription}`;
-            }
-
-            resolve({
-              llmContent: resultMessage,
-              returnDisplay:
-                fileCount === 0
-                  ? 'No files found'
-                  : `Found ${fileCount} matching file(s)`,
-            });
+            resolve();
           } else {
-            const errorMessage = `ripgrep exited with code ${code}. Stderr: ${stderr}`;
-            console.error(errorMessage);
-            reject(new Error(errorMessage));
+            reject(
+              new Error(`ripgrep exited with code ${code}. Stderr: ${stderr}`),
+            );
           }
         });
-
-        rg.on('error', (err) => {
+        rgProcess.on('error', (err) => {
           reject(err);
         });
       });
+
+      const matchingFiles = stdout
+        .split('\n')
+        .filter((line) => line.trim() !== '');
+
+      const absolutePaths = matchingFiles.map((file) =>
+        path.join(this.rootDirectory, file),
+      );
+
+      const fileListDescription = absolutePaths.join('\n');
+      const fileCount = absolutePaths.length;
+
+      let resultMessage;
+      if (fileCount === 0) {
+        resultMessage = `No files found matching pattern "${params.pattern}"`;
+      } else {
+        resultMessage = `Found ${fileCount} file(s) matching "${
+          params.pattern
+        }" within ${searchDirAbsolute}`;
+        resultMessage += `:\n${fileListDescription}`;
+      }
+
+      return {
+        llmContent: resultMessage,
+        returnDisplay:
+          fileCount === 0
+            ? 'No files found'
+            : `Found ${fileCount} matching file(s)`,
+      };
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);

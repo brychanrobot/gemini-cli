@@ -26,6 +26,7 @@ import { WebSearchTool } from '../tools/web-search.js';
 import { GeminiClient } from '../core/client.js';
 import { GEMINI_CONFIG_DIR as GEMINI_DIR } from '../tools/memoryTool.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { FileCacheService } from '../services/fileCacheService.js';
 import { GitService } from '../services/gitService.js';
 import { getProjectTempDir } from '../utils/paths.js';
 import {
@@ -123,6 +124,7 @@ export interface ConfigParameters {
   proxy?: string;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
+  fileCacheService?: FileCacheService;
   bugCommand?: BugCommandSettings;
   model: string;
   extensionContextFilePaths?: string[];
@@ -157,6 +159,7 @@ export class Config {
     enableRecursiveFileSearch: boolean;
   };
   private fileDiscoveryService: FileDiscoveryService | null = null;
+  private fileCacheService: FileCacheService | null = null;
   private gitService: GitService | undefined = undefined;
   private readonly checkpointing: boolean;
   private readonly proxy: string | undefined;
@@ -204,6 +207,7 @@ export class Config {
     this.proxy = params.proxy;
     this.cwd = params.cwd ?? process.cwd();
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
+    this.fileCacheService = params.fileCacheService ?? null;
     this.bugCommand = params.bugCommand;
     this.model = params.model;
     this.extensionContextFilePaths = params.extensionContextFilePaths ?? [];
@@ -436,6 +440,13 @@ export class Config {
       this.fileDiscoveryService = new FileDiscoveryService(this.targetDir);
     }
     return this.fileDiscoveryService;
+  }
+
+  getFileCacheService(): FileCacheService {
+    if (!this.fileCacheService) {
+      this.fileCacheService = new FileCacheService(this.targetDir);
+    }
+    return this.fileCacheService;
   }
 
   getUsageStatisticsEnabled(): boolean {

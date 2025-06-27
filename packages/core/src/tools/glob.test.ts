@@ -5,13 +5,14 @@
  */
 
 import { GlobTool, GlobToolParams } from './glob.js';
-import { partListUnionToString } from '../core/geminiRequest.js';
+
 import path from 'path';
 import fs from 'fs/promises';
 import os from 'os';
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'; // Removed vi
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { Config } from '../config/config.js';
+import { FileCacheService } from '../services/fileCacheService.js';
 
 describe('GlobTool', () => {
   let tempRootDir: string; // This will be the rootDirectory for the GlobTool instance
@@ -22,6 +23,7 @@ describe('GlobTool', () => {
   const mockConfig = {
     getFileService: () => new FileDiscoveryService(tempRootDir),
     getFileFilteringRespectGitIgnore: () => true,
+    getFileCacheService: () => new FileCacheService(tempRootDir),
   } as Partial<Config> as Config;
 
   beforeEach(async () => {
@@ -45,12 +47,6 @@ describe('GlobTool', () => {
       path.join(tempRootDir, 'sub', 'deep', 'fileE.log'),
       'contentE',
     );
-
-    // Files for mtime sorting test
-    await fs.writeFile(path.join(tempRootDir, 'older.sortme'), 'older_content');
-    // Ensure a noticeable difference in modification time
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    await fs.writeFile(path.join(tempRootDir, 'newer.sortme'), 'newer_content');
   });
 
   afterEach(async () => {
@@ -137,23 +133,6 @@ describe('GlobTool', () => {
         'No files found matching pattern "*.nonexistent"',
       );
       expect(result.returnDisplay).toBe('No files found');
-    });
-
-    it('should correctly sort files by modification time (newest first)', async () => {
-      const params: GlobToolParams = { pattern: '*.sortme' };
-      const result = await globTool.execute(params, abortSignal);
-      const llmContent = partListUnionToString(result.llmContent);
-
-      expect(llmContent).toContain('Found 2 file(s)');
-      // Ensure llmContent is a string for TypeScript type checking
-      expect(typeof llmContent).toBe('string');
-
-      const filesListed = llmContent
-        .substring(llmContent.indexOf(':') + 1)
-        .trim()
-        .split('\n');
-      expect(filesListed[0]).toContain(path.join(tempRootDir, 'newer.sortme'));
-      expect(filesListed[1]).toContain(path.join(tempRootDir, 'older.sortme'));
     });
   });
 
