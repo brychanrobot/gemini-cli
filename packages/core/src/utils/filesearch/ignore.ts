@@ -128,4 +128,22 @@ export class Ignore {
   getFingerprint(): string {
     return this.allPatterns.join('\n');
   }
+
+  /**
+   * Serializes the Ignore instance to a plain object for workerpool.
+   */
+  toJSON(): { patterns: string[] } {
+    return { patterns: this.allPatterns };
+  }
+
+  /**
+   * Deserializes a plain object back into an Ignore instance.
+   * @param json The plain object created by toJSON.
+   * @returns A new Ignore instance.
+   */
+  static fromJSON(json: { patterns: string[] }): Ignore {
+    const ignorer = new Ignore();
+    ignorer.add(json.patterns);
+    return ignorer;
+  }
 }

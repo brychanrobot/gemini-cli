@@ -205,6 +205,14 @@ class DirectoryFileSearch implements FileSearch {
     pattern = pattern || '*';
 
     const dir = pattern.endsWith('/') ? pattern : path.dirname(pattern);
+    console.log('[DirectoryFileSearch] Calling crawl with options:', {
+      crawlDirectory: path.join(this.options.projectRoot, dir),
+      cwd: this.options.projectRoot,
+      maxDepth: 0,
+      ignore: this.ignore,
+      cache: this.options.cache,
+      cacheTtl: this.options.cacheTtl,
+    });
     const results = await crawl({
       crawlDirectory: path.join(this.options.projectRoot, dir),
       cwd: this.options.projectRoot,
@@ -213,6 +221,11 @@ class DirectoryFileSearch implements FileSearch {
       cache: this.options.cache,
       cacheTtl: this.options.cacheTtl,
     });
+    console.log(
+      '[DirectoryFileSearch] crawl returned:',
+      results.length,
+      'files',
+    );
 
     const filteredResults = await filter(results, pattern, options.signal);
 

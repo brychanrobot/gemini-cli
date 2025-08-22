@@ -93,7 +93,8 @@
   "dependencies": {
     "@lvce-editor/ripgrep": "^2.1.0",
     "node-fetch": "^3.3.2",
-    "strip-ansi": "^7.1.0"
+    "strip-ansi": "^7.1.0",
+    "workerpool": "^9.3.3"
   },
   "optionalDependencies": {
     "@lydell/node-pty": "1.1.0",
