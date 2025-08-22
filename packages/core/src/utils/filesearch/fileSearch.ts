@@ -166,9 +166,6 @@ class RecursiveFileSearch implements FileSearch {
       if (results.length >= (options.maxResults ?? Infinity)) {
         break;
       }
-      if (candidate === '.') {
-        continue;
-      }
       if (!fileFilter(candidate)) {
         results.push(candidate);
       }
