@@ -90,6 +90,7 @@ function atCompletionReducer(
 
 export interface UseAtCompletionProps {
   enabled: boolean;
+  promptActive: boolean;
   pattern: string;
   config: Config | undefined;
   cwd: string;
@@ -100,6 +101,7 @@ export interface UseAtCompletionProps {
 export function useAtCompletion(props: UseAtCompletionProps): void {
   const {
     enabled,
+    promptActive,
     pattern,
     config,
     cwd,
@@ -123,7 +125,14 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
     dispatch({ type: 'RESET' });
   }, [cwd, config]);
 
-  // Reacts to user input (`pattern`) ONLY.
+  // Triggers initialization proactively when the prompt is active.
+  useEffect(() => {
+    if (props.promptActive && state.status === AtCompletionStatus.IDLE) {
+      dispatch({ type: 'INITIALIZE' });
+    }
+  }, [promptActive, state.status]);
+
+  // Reacts to user input (`pattern`) and initialization status to trigger searches or reset.
   useEffect(() => {
     if (!enabled) {
       // reset when first getting out of completion suggestions
@@ -135,25 +144,31 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
       }
       return;
     }
-    if (pattern === null) {
-      dispatch({ type: 'RESET' });
-      return;
-    }
 
-    if (state.status === AtCompletionStatus.IDLE) {
-      dispatch({ type: 'INITIALIZE' });
-    } else if (
-      (state.status === AtCompletionStatus.READY ||
-        state.status === AtCompletionStatus.SEARCHING) &&
-      pattern !== state.pattern // Only search if the pattern has changed
+    // If initialization is complete and there's a pattern, trigger a search
+    // or if the pattern has changed during an ongoing search.
+    if (
+      state.status === AtCompletionStatus.READY ||
+      state.status === AtCompletionStatus.SEARCHING
     ) {
-      dispatch({ type: 'SEARCH', payload: pattern });
+      if (pattern === null) {
+        dispatch({ type: 'RESET' });
+        return;
+      }
+      if (pattern !== state.pattern) {
+        dispatch({ type: 'SEARCH', payload: pattern });
+      }
     }
   }, [enabled, pattern, state.status, state.pattern]);
 
   // The "Worker" that performs async operations based on status.
   useEffect(() => {
     const initialize = async () => {
+      if (fileSearch.current) {
+        dispatch({ type: 'INITIALIZE_SUCCESS' });
+        return;
+      }
+
       try {
         const searcher = FileSearchFactory.create({
           projectRoot: cwd,
@@ -172,9 +187,6 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         await searcher.initialize();
         fileSearch.current = searcher;
         dispatch({ type: 'INITIALIZE_SUCCESS' });
-        if (state.pattern !== null) {
-          dispatch({ type: 'SEARCH', payload: state.pattern });
-        }
       } catch (_) {
         dispatch({ type: 'ERROR' });
       }
