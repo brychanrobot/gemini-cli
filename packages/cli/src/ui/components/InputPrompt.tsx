@@ -93,6 +93,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     commandContext,
     reverseSearchActive,
     config,
+    focus,
   );
 
   const reverseSearchCompletion = useReverseSearchCompletion(

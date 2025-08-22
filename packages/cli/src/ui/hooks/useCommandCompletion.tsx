@@ -54,6 +54,7 @@ export function useCommandCompletion(
   commandContext: CommandContext,
   reverseSearchActive: boolean = false,
   config?: Config,
+  promptActive: boolean = false,
 ): UseCommandCompletionReturn {
   const {
     suggestions,
@@ -157,6 +158,7 @@ export function useCommandCompletion(
 
   useAtCompletion({
     enabled: completionMode === CompletionMode.AT,
+    promptActive,
     pattern: query || '',
     config,
     cwd,
