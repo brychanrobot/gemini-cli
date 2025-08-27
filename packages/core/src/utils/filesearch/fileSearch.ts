@@ -132,8 +132,10 @@ class RecursiveFileSearch implements FileSearch {
     } else {
       let shouldCache = true;
       if (pattern.includes('*') || this.options.disableFuzzySearch) {
+        console.log('using picomatch');
         filteredCandidates = await filter(candidates, pattern, options.signal);
       } else {
+        console.log('using fzf');
         filteredCandidates = await this.fzf
           .find(pattern)
           .then((results: Array<FzfResultItem<string>>) =>

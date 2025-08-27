@@ -6,7 +6,8 @@
 
 import path from 'node:path';
 import { fdir } from 'fdir';
-import type { Ignore } from './ignore.js';
+import { Ignore } from './ignore.js';
+import workerpool from 'workerpool';
 import * as cache from './crawlCache.js';
 
 export interface CrawlOptions {
@@ -17,7 +18,7 @@ export interface CrawlOptions {
   // The fdir maxDepth option.
   maxDepth?: number;
   // A pre-configured Ignore instance.
-  ignore: Ignore;
+  ignorePatterns: string[];
   // Caching options.
   cache: boolean;
   cacheTtl: number;
@@ -78,10 +79,12 @@ async function _processCrawlResults(
 }
 
 export async function crawl(options: CrawlOptions): Promise<string[]> {
+  const ignoreInstance = Ignore.deserialize(options.ignorePatterns);
+
   if (options.cache) {
     const cacheKey = cache.getCacheKey(
       options.crawlDirectory,
-      options.ignore.getFingerprint(),
+      ignoreInstance.getFingerprint(),
       options.maxDepth,
     );
     const cachedResults = cache.read(cacheKey);
@@ -92,7 +95,7 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
   }
 
   const posixCwd = options.cwd.split(path.sep).join(path.posix.sep);
-  const dirFilter = options.ignore.getDirectoryFilter();
+  const dirFilter = ignoreInstance.getDirectoryFilter();
   let finalResults: string[];
 
   try {
@@ -108,7 +111,7 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
   if (options.cache) {
     const cacheKey = cache.getCacheKey(
       options.crawlDirectory,
-      options.ignore.getFingerprint(),
+      ignoreInstance.getFingerprint(),
       options.maxDepth,
     );
     cache.write(cacheKey, finalResults, options.cacheTtl * 1000);
@@ -116,3 +119,5 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
 
   return finalResults;
 }
+
+workerpool.worker({ crawl });

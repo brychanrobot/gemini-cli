@@ -128,4 +128,14 @@ export class Ignore {
   getFingerprint(): string {
     return this.allPatterns.join('\n');
   }
+
+  serialize(): string[] {
+    return this.allPatterns;
+  }
+
+  static deserialize(patterns: string[]): Ignore {
+    const ignorer = new Ignore();
+    ignorer.add(patterns);
+    return ignorer;
+  }
 }
